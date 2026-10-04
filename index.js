@@ -1,11 +1,9 @@
 /**
  * Lost Sword Reddit 资讯服务 - RSS版
- * 不需要任何API认证，直接抓Reddit RSS
  */
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
-const { DOMParser } = require('linkedom');
 
 const PORT = process.env.PORT || 3000;
 const CACHE_FILE = '/tmp/ls_cache.json';
@@ -15,13 +13,10 @@ function fetch(url, timeout = 15000) {
     const lib = url.startsWith('https') ? https : http;
     const req = lib.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; LostSwordBot/1.0)',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Accept': 'application/rss+xml, application/xml, text/xml, */*'
       }
     }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return resolve(fetch(res.headers.location, timeout));
-      }
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
@@ -31,40 +26,43 @@ function fetch(url, timeout = 15000) {
   });
 }
 
+function stripHtml(str) {
+  return str.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+}
+
 function parseRSS(xml) {
   const entries = [];
-  // 简单正则解析 <entry>...</entry>
-  const entryMatches = xml.match(/<entry>([\s\S]*?)<\/entry>/g) || [];
-  for (const entry of entryMatches) {
+  // 解析 <entry>...</entry> (新版 reddit)
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let match;
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const block = match[1];
     const get = (tag) => {
-      const m = entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
-      return m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+      const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i').exec(block);
+      return m ? stripHtml(m[1]) : '';
     };
-    const id = get('id');
+    const id = get('id') || get('guid');
     const title = get('title');
-    const author = get('author');
-    const link = (entry.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1];
-    const updated = get('updated');
-    const content = get('content');
-    if (id && title) {
-      entries.push({ id, title, author, link, updated, content: content.substring(0, 200) });
-    }
+    const author = get('author') || get('dc:creator');
+    const link = (block.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1];
+    const updated = get('updated') || get('published');
+    const content = get('content') || get('description');
+    if (id && title) entries.push({ id, title, author, link, updated, content: content.substring(0, 200) });
   }
-  // 也尝试解析旧版 reddit RSS 的 <item>
-  const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
-  for (const item of itemMatches) {
+  // 解析 <item>...</item> (旧版 reddit RSS)
+  const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+  while ((match = itemRegex.exec(xml)) !== null) {
+    const block = match[1];
     const get = (tag) => {
-      const m = item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
-      return m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+      const m = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i').exec(block);
+      return m ? stripHtml(m[1]) : '';
     };
     const title = get('title');
-    const link = (item.match(/<link>(.*?)<\/link>/s) || ['', ''])[1].trim() || get('link');
-    const author = get('creator') || get('author');
-    const pubDate = get('pubDate');
-    const description = get('description');
-    if (title) {
-      entries.push({ id: link || title, title, author, link, updated: pubDate, content: description.substring(0, 200) });
-    }
+    const link = get('link') || (block.match(/<link>([\s\S]*?)<\/link>/s) || ['', ''])[1].trim();
+    const author = get('dc:creator') || get('author');
+    const pubDate = get('pubDate') || get('updated');
+    const description = get('description') || get('content');
+    if (title) entries.push({ id: link || title, title, author, link, updated: pubDate, content: description.substring(0, 200) });
   }
   return entries;
 }
@@ -88,19 +86,18 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/test-rss') {
       const { status, body } = await fetch('https://www.reddit.com/r/LostSwordOfficial/hot.rss', 15000);
       const entries = parseRSS(body);
-      res.end(JSON.stringify({ status, body_len: body.length, entries_found: entries.length, entries: entries.slice(0, 3) }, null, 2));
+      res.end(JSON.stringify({ status, body_len: body.length, entries: entries.slice(0, 3) }, null, 2));
       return;
     }
     if (url.pathname === '/push') {
       const rssUrls = [
         'https://www.reddit.com/r/LostSwordOfficial/hot.rss',
         'https://www.reddit.com/r/LostSwordOfficial/new.rss',
-        'https://www.reddit.com/r/LostSwordOfficial/.rss',
       ];
       const results = await Promise.allSettled(rssUrls.map(u => fetch(u, 15000)));
       const allEntries = [];
       for (const r of results) {
-        if (r.status === 'fulfilled') {
+        if (r.status === 'fulfilled' && r.value.status === 200) {
           allEntries.push(...parseRSS(r.value.body));
         }
       }
@@ -108,7 +105,7 @@ const server = http.createServer(async (req, res) => {
       const deduped = allEntries.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
       const newHash = computeHash(deduped.map(e => e.id).join('|'));
       saveCache({ postHash: newHash, codeHash: '', lastPush: Date.now() });
-      res.end(JSON.stringify({ posts: deduped.slice(0, 10), ts: Date.now(), total_entries: deduped.length }));
+      res.end(JSON.stringify({ posts: deduped.slice(0, 10), ts: Date.now(), total: deduped.length }));
       return;
     }
     res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
