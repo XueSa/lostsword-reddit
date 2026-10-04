@@ -1,0 +1,7 @@
+{
+  "name": "lostsword-reddit-proxy",
+  "version": "1.0.0",
+  "description": "Lost Sword Reddit proxy for OpenClaw",
+  "main": "index.js",
+  "engines": { "node": ">=18" }
+}
