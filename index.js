@@ -1,20 +1,27 @@
 /**
- * Lost Sword Reddit 资讯服务
+ * Lost Sword Reddit 资讯服务 - RSS版
+ * 不需要任何API认证，直接抓Reddit RSS
  */
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const { DOMParser } = require('linkedom');
 
 const PORT = process.env.PORT || 3000;
 const CACHE_FILE = '/tmp/ls_cache.json';
-const USER_AGENT = 'LostSwordBot/1.0 (by u/LostSwordBot)';
 
 function fetch(url, timeout = 15000) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('https') ? https : http;
     const req = lib.get(url, {
-      headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/json' }
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; LostSwordBot/1.0)',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+      }
     }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return resolve(fetch(res.headers.location, timeout));
+      }
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
@@ -24,41 +31,42 @@ function fetch(url, timeout = 15000) {
   });
 }
 
-async function fetchRedditPosts() {
-  const results = await Promise.allSettled([
-    fetch('https://www.reddit.com/r/LostSwordOfficial/hot.json?limit=10'),
-    fetch('https://www.reddit.com/r/LostSwordOfficial/new.json?limit=10'),
-  ]);
-  const posts = [];
-  for (const r of results) {
-    if (r.status === 'rejected') continue;
-    const { status, body } = r.value;
-    if (status !== 200) continue;
-    const data = JSON.parse(body);
-    for (const c of (data?.data?.children || [])) {
-      const p = c.data;
-      posts.push({ id: p.id, title: p.title, author: p.author, score: p.score,
-        comments: p.num_comments, permalink: `https://reddit.com${p.permalink}`,
-        flair: p.link_flair_text || null, created: new Date(p.created_utc * 1000).toISOString() });
+function parseRSS(xml) {
+  const entries = [];
+  // 简单正则解析 <entry>...</entry>
+  const entryMatches = xml.match(/<entry>([\s\S]*?)<\/entry>/g) || [];
+  for (const entry of entryMatches) {
+    const get = (tag) => {
+      const m = entry.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
+      return m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+    };
+    const id = get('id');
+    const title = get('title');
+    const author = get('author');
+    const link = (entry.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1];
+    const updated = get('updated');
+    const content = get('content');
+    if (id && title) {
+      entries.push({ id, title, author, link, updated, content: content.substring(0, 200) });
     }
   }
-  const seen = new Set();
-  return posts.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
-}
-
-async function searchCodes() {
-  try {
-    const { status, body } = await fetch(
-      'https://www.reddit.com/search.json?q=lostsword+redeem+OR+gift+OR+code&sort=relevance&t=month&limit=15'
-    );
-    if (status !== 200) return [];
-    const data = JSON.parse(body);
-    return (data?.data?.children || []).slice(0, 10).map(c => {
-      const p = c.data;
-      return { id: p.id, title: p.title, author: p.author, score: p.score,
-        permalink: `https://reddit.com${p.permalink}`, text: p.selftext?.substring(0, 400) || '' };
-    });
-  } catch(e) { return []; }
+  // 也尝试解析旧版 reddit RSS 的 <item>
+  const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
+  for (const item of itemMatches) {
+    const get = (tag) => {
+      const m = item.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
+      return m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+    };
+    const title = get('title');
+    const link = (item.match(/<link>(.*?)<\/link>/s) || ['', ''])[1].trim() || get('link');
+    const author = get('creator') || get('author');
+    const pubDate = get('pubDate');
+    const description = get('description');
+    if (title) {
+      entries.push({ id: link || title, title, author, link, updated: pubDate, content: description.substring(0, 200) });
+    }
+  }
+  return entries;
 }
 
 function loadCache() {
@@ -77,39 +85,34 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     if (url.pathname === '/health') { res.end(JSON.stringify({ ok: true, ts: Date.now() })); return; }
-    if (url.pathname === '/test-reddit') {
-      // 测试 Reddit 连通性
-      const r1 = await fetch('https://www.reddit.com/r/LostSwordOfficial/hot.json?limit=1', 10000);
-      const r2 = await fetch('https://www.reddit.com/.json?limit=1', 10000);
-      res.end(JSON.stringify({
-        test1: { url: '/r/LostSwordOfficial/hot', status: r1.status, body_len: r1.body.length },
-        test2: { url: '/.json', status: r2.status, body_len: r2.body.length },
-        ts: Date.now()
-      }));
-      return;
-    }
-    if (url.pathname === '/check') {
-      const cache = loadCache();
-      const [posts, codes] = await Promise.all([fetchRedditPosts(), searchCodes()]);
-      const newPostHash = computeHash(posts.map(p => p.id).join('|'));
-      const newCodeHash = computeHash(codes.map(c => c.id).join('|'));
-      const changed = newPostHash !== cache.postHash || newCodeHash !== cache.codeHash;
-      if (changed) saveCache({ ...cache, postHash: newPostHash, codeHash: newCodeHash });
-      res.end(JSON.stringify({ changed, posts: posts.slice(0, 10), codes: codes.slice(0, 5),
-        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now() }));
+    if (url.pathname === '/test-rss') {
+      const { status, body } = await fetch('https://www.reddit.com/r/LostSwordOfficial/hot.rss', 15000);
+      const entries = parseRSS(body);
+      res.end(JSON.stringify({ status, body_len: body.length, entries_found: entries.length, entries: entries.slice(0, 3) }, null, 2));
       return;
     }
     if (url.pathname === '/push') {
-      const [posts, codes] = await Promise.all([fetchRedditPosts(), searchCodes()]);
-      const newPostHash = computeHash(posts.map(p => p.id).join('|'));
-      const newCodeHash = computeHash(codes.map(c => c.id).join('|'));
-      saveCache({ postHash: newPostHash, codeHash: newCodeHash, lastPush: Date.now() });
-      res.end(JSON.stringify({ posts: posts.slice(0, 10), codes: codes.slice(0, 5),
-        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now() }));
+      const rssUrls = [
+        'https://www.reddit.com/r/LostSwordOfficial/hot.rss',
+        'https://www.reddit.com/r/LostSwordOfficial/new.rss',
+        'https://www.reddit.com/r/LostSwordOfficial/.rss',
+      ];
+      const results = await Promise.allSettled(rssUrls.map(u => fetch(u, 15000)));
+      const allEntries = [];
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          allEntries.push(...parseRSS(r.value.body));
+        }
+      }
+      const seen = new Set();
+      const deduped = allEntries.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
+      const newHash = computeHash(deduped.map(e => e.id).join('|'));
+      saveCache({ postHash: newHash, codeHash: '', lastPush: Date.now() });
+      res.end(JSON.stringify({ posts: deduped.slice(0, 10), ts: Date.now(), total_entries: deduped.length }));
       return;
     }
     res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
-  } catch(e) { console.error(`Error: ${e.message}`); res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+  } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
 });
 
-server.listen(PORT, '0.0.0.0', () => { console.error(`Lost Sword Reddit Service on port ${PORT}`); });
+server.listen(PORT, '0.0.0.0', () => { console.error(`Lost Sword Reddit RSS Service on port ${PORT}`); });
