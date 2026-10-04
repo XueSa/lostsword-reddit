@@ -1,5 +1,6 @@
 /**
- * Lost Sword Reddit 资讯服务 - RSS版 + 内存缓存
+ * Lost Sword Reddit 资讯服务
+ * 抓 RSS 拿帖子列表，再用 Reddit JSON API 拿每帖正文
  */
 const http = require('http');
 const https = require('https');
@@ -15,7 +16,7 @@ function fetch(url, timeout = 15000) {
     const req = lib.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+        'Accept': 'application/json'
       }
     }, (res) => {
       const chunks = [];
@@ -28,10 +29,13 @@ function fetch(url, timeout = 15000) {
 }
 
 function stripHtml(str) {
-  return str.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, '')
+  return str
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ').trim();
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\s+|\s+$/g, '');
 }
 
 function parseRSS(xml) {
@@ -42,17 +46,44 @@ function parseRSS(xml) {
     while ((m = rx.exec(xml)) !== null) {
       const b = m[1];
       const get = (t) => { const r = new RegExp(`<${t}[^>]*>([\\s\\S]*?)<\\/${t}>`, 'i').exec(b); return r ? stripHtml(r[1]) : ''; };
-      const id = get('id') || get('guid');
+      const id = (b.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1] || get('id') || get('guid');
       const title = get('title');
       const rawAuthor = get('author') || get('dc:creator') || '';
       const author = rawAuthor.split('http')[0].trim();
-      const link = (b.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1] || get('link');
+      const link = (b.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1];
       const updated = get('updated') || get('published') || get('pubDate');
-      const content = get('content') || get('description');
-      if (id && title) entries.push({ id, title, author, link, updated, content: content.substring(0, 150) });
+      if (id && title) entries.push({ id, title, author, link, updated });
     }
   }
   return entries;
+}
+
+async function enrichWithBody(posts) {
+  // 只取前5帖去 Reddit 拿正文
+  const top = posts.slice(0, 5);
+  const results = await Promise.allSettled(
+    top.map(p => {
+      // 从 link 提取帖子 ID，如 https://www.reddit.com/r/LostSwordOfficial/comments/xxxxx/...
+      const match = p.link.match(/\/comments\/([a-z0-9]+)\//i);
+      if (!match) return Promise.resolve({ ...p, body: '' });
+      const postId = match[1];
+      return fetch(`https://www.reddit.com/r/LostSwordOfficial/comments/${postId}.json`, 12000)
+        .then(r => {
+          if (r.status !== 200) return { ...p, body: '' };
+          try {
+            const data = JSON.parse(r.body);
+            const selftext = data?.[0]?.data?.children?.[0]?.data?.selftext || '';
+            return { ...p, body: stripHtml(selftext).substring(0, 300) };
+          } catch(e) { return { ...p, body: '' }; }
+        })
+        .catch(() => ({ ...p, body: '' }));
+    })
+  );
+  const enriched = results.map(r => r.status === 'fulfilled' ? r.value : null).filter(Boolean);
+  // 合并：enriched 的字段替换原 posts
+  const enrichedMap = {};
+  for (const e of enriched) enrichedMap[e.link] = e.body;
+  return posts.map(p => ({ ...p, body: enrichedMap[p.link] || '' }));
 }
 
 async function fetchPosts() {
@@ -65,7 +96,9 @@ async function fetchPosts() {
     if (r.status === 'fulfilled' && r.value.status === 200) all.push(...parseRSS(r.value.body));
   }
   const seen = new Set();
-  return all.filter(e => { if (seen.has(e.id)) return false; seen.add(e.id); return true; });
+  const deduped = all.filter(e => { if (seen.has(e.link)) return false; seen.add(e.link); return true; });
+  // 去 Reddit 拿正文
+  return await enrichWithBody(deduped);
 }
 
 async function getPosts() {
@@ -78,8 +111,7 @@ async function getPosts() {
   return cache.posts;
 }
 
-// 启动预热
-(async () => { try { await getPosts(); console.error('[Ready] Cache warmed up'); } catch(e) { console.error('[Ready] Warmup failed:', e.message); } })();
+(async () => { try { await getPosts(); console.error('[Ready] Cache warmed up'); } catch(e) { console.error('[Ready] Warmup failed'); } })();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
@@ -87,12 +119,12 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   try {
     if (url.pathname === '/health') {
-      res.end(JSON.stringify({ ok: true, ts: Date.now(), posts: cache.posts.length, cacheAge: cache.ts ? Date.now() - cache.ts : null }));
+      res.end(JSON.stringify({ ok: true, ts: Date.now(), posts: cache.posts.length }));
       return;
     }
     if (url.pathname === '/push') {
       const posts = await getPosts();
-      res.end(JSON.stringify({ posts: posts.slice(0, 10), ts: Date.now(), total: posts.length }));
+      res.end(JSON.stringify({ posts: posts.slice(0, 10), ts: Date.now() }));
       return;
     }
     res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
