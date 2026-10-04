@@ -9,14 +9,16 @@ CACHE_TTL = 300
 
 cache = {'posts': [], 'ts': 0}
 
-def fetch(url, timeout=15):
-    req = urllib.request.Request(url, headers={'User-Agent': 'LostSwordBot/1.0'})
+def fetch(url, timeout=10):
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'LostSwordBot/1.0 (+https://github.com/LostSword)'
+    })
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
 def fetch_posts():
-    params = 'subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=25'
-    data = fetch(f'https://api.pullpush.io/reddit/search/submission/?{params}')
+    url = 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=20'
+    data = fetch(url, timeout=10)
     posts = []
     for p in data.get('data', []):
         posts.append({
@@ -39,16 +41,26 @@ def get_posts():
         cache['posts'] = fetch_posts()
         cache['ts'] = now
     except Exception as e:
-        if not cache['posts']: raise e
+        print(f'Fetch error: {e}', flush=True)
+        if not cache['posts']:
+            cache['posts'] = []
     return cache['posts']
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/health':
-            self._send({'ok': True, 'ts': int(time.time()), 'posts': len(cache['posts'])}); return
-        if self.path == '/push':
-            self._send({'posts': get_posts(), 'ts': int(time.time())}); return
-        self.send_error(404, 'not found')
+        try:
+            if self.path == '/health':
+                self._send({'ok': True, 'ts': int(time.time()), 'posts': len(cache['posts'])})
+                return
+            if self.path == '/push':
+                posts = get_posts()
+                self._send({'posts': posts, 'ts': int(time.time())})
+                return
+            self.send_error(404, 'not found')
+        except Exception as e:
+            print(f'Error: {e}', flush=True)
+            self._send({'error': str(e), 'posts': cache.get('posts', [])})
+
     def _send(self, data):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(200)
@@ -57,12 +69,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Length', len(body))
         self.end_headers()
         self.wfile.write(body)
+
     def log_message(self, fmt, *args):
-        import sys; sys.stderr.write(f'{fmt % args}\n')
+        pass
 
 try:
-    cache['posts'] = fetch_posts(); cache['ts'] = time.time()
-    print(f'Cached {len(cache["posts"])} posts', flush=True)
+    posts = fetch_posts()
+    cache['posts'] = posts
+    cache['ts'] = time.time()
+    print(f'Cached {len(posts)} posts', flush=True)
 except Exception as e:
     print(f'Warmup failed: {e}', flush=True)
 
