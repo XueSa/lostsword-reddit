@@ -1,8 +1,6 @@
 /**
  * Lost Sword Reddit 资讯服务
- * 部署在 Render.com（美国俄勒冈节点），直接抓取 Reddit
  */
-
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -17,60 +15,50 @@ function fetch(url, timeout = 15000) {
     const req = lib.get(url, {
       headers: { 'User-Agent': USER_AGENT, 'Accept': 'application/json' }
     }, (res) => {
-      console.error(`[Reddit] ${url} → status ${res.statusCode}`);
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return resolve(fetch(res.headers.location, timeout));
-      }
       const chunks = [];
       res.on('data', c => chunks.push(c));
       res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
-    req.on('error', e => { console.error(`[Reddit] ERROR ${url}: ${e.message}`); reject(e); });
+    req.on('error', e => reject(e));
     req.setTimeout(timeout, () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
 async function fetchRedditPosts() {
-  const results = [];
-  const urls = [
-    'https://www.reddit.com/r/LostSwordOfficial/hot.json?limit=10',
-    'https://www.reddit.com/r/LostSwordOfficial/new.json?limit=10',
-  ];
-  console.error('[Reddit] Fetching posts from:', urls.join(', '));
-  await Promise.allSettled(urls.map(async (url) => {
-    try {
-      const { status, body } = await fetch(url);
-      console.error(`[Reddit] ${url} → status=${status}, body_len=${body.length}`);
-      if (status !== 200) return;
-      const data = JSON.parse(body);
-      const children = data?.data?.children || [];
-      console.error(`[Reddit] ${url} → ${children.length} posts`);
-      for (const c of children) {
-        const p = c.data;
-        results.push({ id: p.id, title: p.title, author: p.author, score: p.score, comments: p.num_comments,
-          permalink: `https://reddit.com${p.permalink}`, flair: p.link_flair_text || null,
-          created: new Date(p.created_utc * 1000).toISOString() });
-      }
-    } catch(e) { console.error(`[Reddit] fetch error [${url}]: ${e.message}`); }
-  }));
+  const results = await Promise.allSettled([
+    fetch('https://www.reddit.com/r/LostSwordOfficial/hot.json?limit=10'),
+    fetch('https://www.reddit.com/r/LostSwordOfficial/new.json?limit=10'),
+  ]);
+  const posts = [];
+  for (const r of results) {
+    if (r.status === 'rejected') continue;
+    const { status, body } = r.value;
+    if (status !== 200) continue;
+    const data = JSON.parse(body);
+    for (const c of (data?.data?.children || [])) {
+      const p = c.data;
+      posts.push({ id: p.id, title: p.title, author: p.author, score: p.score,
+        comments: p.num_comments, permalink: `https://reddit.com${p.permalink}`,
+        flair: p.link_flair_text || null, created: new Date(p.created_utc * 1000).toISOString() });
+    }
+  }
   const seen = new Set();
-  return results.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
+  return posts.filter(p => { if (seen.has(p.id)) return false; seen.add(p.id); return true; });
 }
 
 async function searchCodes() {
-  console.error('[Reddit] Searching codes...');
   try {
-    const { status, body } = await fetch('https://www.reddit.com/search.json?q=lostsword+redeem+OR+gift+OR+code&sort=relevance&t=month&limit=15');
-    if (status !== 200) { console.error(`[Reddit] codes search failed: ${status}`); return []; }
+    const { status, body } = await fetch(
+      'https://www.reddit.com/search.json?q=lostsword+redeem+OR+gift+OR+code&sort=relevance&t=month&limit=15'
+    );
+    if (status !== 200) return [];
     const data = JSON.parse(body);
-    const results = (data?.data?.children || []).map(c => {
+    return (data?.data?.children || []).slice(0, 10).map(c => {
       const p = c.data;
       return { id: p.id, title: p.title, author: p.author, score: p.score,
         permalink: `https://reddit.com${p.permalink}`, text: p.selftext?.substring(0, 400) || '' };
     });
-    console.error(`[Reddit] codes search → ${results.length} results`);
-    return results.slice(0, 10);
-  } catch(e) { console.error(`[Reddit] codes search error: ${e.message}`); return []; }
+  } catch(e) { return []; }
 }
 
 function loadCache() {
@@ -78,7 +66,6 @@ function loadCache() {
   return { postHash: '', codeHash: '', lastPush: 0 };
 }
 function saveCache(data) { try { fs.writeFileSync(CACHE_FILE, JSON.stringify(data), 'utf8'); } catch(e) {} }
-
 function computeHash(str) {
   let hash = 0;
   for (let i = 0; i < str.length; i++) { hash = ((hash << 5) - hash) + str.charCodeAt(i); hash = hash & hash; }
@@ -88,13 +75,17 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
-  console.error(`[Server] ${req.method} ${url.pathname} at ${new Date().toISOString()}`);
   try {
     if (url.pathname === '/health') { res.end(JSON.stringify({ ok: true, ts: Date.now() })); return; }
-    if (url.pathname === '/debug') {
-      const posts = await fetchRedditPosts();
-      const codes = await searchCodes();
-      res.end(JSON.stringify({ posts, codes, ts: Date.now() }));
+    if (url.pathname === '/test-reddit') {
+      // 测试 Reddit 连通性
+      const r1 = await fetch('https://www.reddit.com/r/LostSwordOfficial/hot.json?limit=1', 10000);
+      const r2 = await fetch('https://www.reddit.com/.json?limit=1', 10000);
+      res.end(JSON.stringify({
+        test1: { url: '/r/LostSwordOfficial/hot', status: r1.status, body_len: r1.body.length },
+        test2: { url: '/.json', status: r2.status, body_len: r2.body.length },
+        ts: Date.now()
+      }));
       return;
     }
     if (url.pathname === '/check') {
@@ -105,8 +96,7 @@ const server = http.createServer(async (req, res) => {
       const changed = newPostHash !== cache.postHash || newCodeHash !== cache.codeHash;
       if (changed) saveCache({ ...cache, postHash: newPostHash, codeHash: newCodeHash });
       res.end(JSON.stringify({ changed, posts: posts.slice(0, 10), codes: codes.slice(0, 5),
-        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now(),
-        message: changed ? 'changes detected' : 'no changes' }));
+        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now() }));
       return;
     }
     if (url.pathname === '/push') {
@@ -119,9 +109,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
-  } catch(e) { console.error(`[Server] Error: ${e.message}`); res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+  } catch(e) { console.error(`Error: ${e.message}`); res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.error(`Lost Sword Reddit Service running on port ${PORT}`);
-});
+server.listen(PORT, '0.0.0.0', () => { console.error(`Lost Sword Reddit Service on port ${PORT}`); });
