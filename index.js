@@ -100,3 +100,26 @@ const server = http.createServer(async (req, res) => {
       const newPostHash = computeHash(posts.map(p => p.id).join('|'));
       const newCodeHash = computeHash(codes.map(c => c.id).join('|'));
       const changed = newPostHash !== cache.postHash || newCodeHash !== cache.codeHash;
+     if (changed) saveCache({ ...cache, postHash: newPostHash, codeHash: newCodeHash });
+      res.end(JSON.stringify({ changed, posts: posts.slice(0, 10), codes: codes.slice(0, 5),
+        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now(),
+        message: changed ? 'changes detected' : 'no changes' }));
+      return;
+    }
+    if (url.pathname === '/push') {
+      const [posts, codes] = await Promise.all([fetchRedditPosts(), searchCodes()]);
+      const newPostHash = computeHash(posts.map(p => p.id).join('|'));
+      const newCodeHash = computeHash(codes.map(c => c.id).join('|'));
+      saveCache({ postHash: newPostHash, codeHash: newCodeHash, lastPush: Date.now() });
+      res.end(JSON.stringify({ posts: posts.slice(0, 10), codes: codes.slice(0, 5),
+        postHash: newPostHash, codeHash: newCodeHash, ts: Date.now() }));
+      return;
+    }
+    res.statusCode = 404; res.end(JSON.stringify({ error: 'not found' }));
+  } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Lost Sword Reddit Service running on port ${PORT}`);
+  console.log('Endpoints: /health | /check | /push');
+});
