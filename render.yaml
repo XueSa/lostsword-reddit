@@ -1,9 +1,9 @@
 services:
   - type: web
     name: lostsword-reddit
-    env: node
+    env: python
     region: oregon
     plan: free
-    buildCommand: npm install
-    startCommand: node index.js
+    buildCommand: python3 -m http.server 3000
+    startCommand: python3 server.py
     healthCheckPath: /health
