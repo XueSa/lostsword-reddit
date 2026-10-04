@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: lostsword-reddit
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
