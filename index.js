@@ -12,8 +12,7 @@ function fetch(url, timeout = 15000) {
     const req = lib.get(url, {
       headers: {
         'User-Agent': 'LostSwordBot/1.0 (+https://github.com/LostSword)',
-        'Accept': 'application/rss+xml, application/xml, text/xml, application/json, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
         'Cache-Control': 'no-cache'
       }
     }, (res) => {
@@ -37,32 +36,25 @@ function stripHtml(str) {
 function parseRSSEntries(xml) {
   const entries = [];
   if (!xml || xml.length < 50) return entries;
-
   for (const tag of ['entry', 'item']) {
-    let pos = 0;
-    let count = 0;
+    let pos = 0, count = 0;
     while (count < 100) {
       const open = xml.indexOf(`<${tag}>`, pos);
       if (open === -1) break;
       const close = xml.indexOf(`</${tag}>`, open);
       if (close === -1) break;
       const block = xml.substring(open + tag.length + 2, close);
-
-      // 提取 link 属性
       const linkAttr = (block.match(/<link[^>]+href=["']([^"']+)["']/) || [])[1]
         || (block.match(/<link>([^<]+)<\/link>/) || [])[1] || '';
-
       const get = (t) => {
         const m = new RegExp(`<${t}[^>]*>([\\s\\S]*?)<\\/${t}>`, 'i').exec(block);
         return m ? stripHtml(m[1]) : '';
       };
-
       const id = get('id') || get('guid') || linkAttr;
       const title = get('title');
       const rawAuthor = get('author') || get('dc:creator') || '';
       const author = rawAuthor.split('http')[0].trim();
       const updated = get('updated') || get('published') || get('pubDate');
-
       if (title) entries.push({ id, title, author, link: linkAttr, updated });
       pos = close + tag.length + 3;
       count++;
@@ -71,32 +63,66 @@ function parseRSSEntries(xml) {
   return entries;
 }
 
-async function fetchPosts() {
-  const urls = [
-    { url: 'https://www.reddit.com/r/LostSwordOfficial/hot.rss', key: 'hot' },
-    { url: 'https://www.reddit.com/r/LostSwordOfficial/new.rss', key: 'new' },
-  ];
+function extractBody(html) {
+  if (!html) return '';
+  // old.reddit.com 格式
+  const m = html.match(/<div[^>]+class="usertext-body[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
+  if (m) return stripHtml(m[1]).substring(0, 400);
+  // 新版 reddit
+  const m2 = html.match(/<div[^>]+data-testid="post-text"[^>]*>([\s\S]*?)<\/div>/i);
+  if (m2) return stripHtml(m2[1]).substring(0, 400);
+  return '';
+}
 
+async function enrichWithBody(posts) {
+  const top = posts.slice(0, 5);
   const results = await Promise.allSettled(
-    urls.map(({ url }) => fetch(url, 15000))
+    top.map(async (p) => {
+      // 试 old.reddit.com
+      const oldUrl = p.link.replace('://www.reddit.com', '://old.reddit.com');
+      try {
+        const { status, body } = await fetch(oldUrl, 12000);
+        if (status === 200) {
+          const text = extractBody(body);
+          if (text) return { ...p, body: text };
+        }
+      } catch(e) {}
+      // 备用：直接用新链接
+      try {
+        const { status, body } = await fetch(p.link, 10000);
+        if (status === 200) {
+          const text = extractBody(body);
+          if (text) return { ...p, body: text };
+        }
+      } catch(e) {}
+      return p;
+    })
   );
+  const enrichedMap = {};
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value?.link) enrichedMap[r.value.link] = r.value;
+  }
+  return posts.map(p => enrichedMap[p.link] || p);
+}
 
+async function fetchPosts() {
+  const results = await Promise.allSettled([
+    fetch('https://www.reddit.com/r/LostSwordOfficial/hot.rss'),
+    fetch('https://www.reddit.com/r/LostSwordOfficial/new.rss'),
+  ]);
   const all = [];
   for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.status === 200 && r.value.body) {
-      const entries = parseRSSEntries(r.value.body);
-      all.push(...entries);
-    }
+   if (r.status === 'fulfilled' && r.value.status === 200 && r.value.body)
+      all.push(...parseRSSEntries(r.value.body));
   }
-
-  // 去重
   const seen = new Set();
-  return all.filter(e => {
+  const deduped = all.filter(e => {
     const key = e.link || e.id;
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+  return await enrichWithBody(deduped);
 }
 
 async function getPosts() {
@@ -116,10 +142,11 @@ async function getPosts() {
     cache.posts = posts;
     cache.ts = Date.now();
     console.error(`[Startup] Got ${posts.length} posts`);
-  } catch(e) {
-    console.error('[Startup] Failed:', e.message);
-  }
+    const withBody = posts.filter(p => p.body).length;
+    console.error(`[Startup] ${withBody} posts have body text`);
+  } catch(e) { console.error('[Startup] Failed:', e.message); }
 })();
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   res.setHeader('Access-Control-Allow-Origin', '*');
