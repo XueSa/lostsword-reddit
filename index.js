@@ -1,7 +1,3 @@
-/**
- * Lost Sword Reddit 资讯服务 - 最终版
- * 策略：RSS 拿列表，抓 Reddit HTML 页面提取正文
- */
 const http = require('http');
 const https = require('https');
 
@@ -10,20 +6,20 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 
 let cache = { posts: [], ts: 0 };
 
-function fetch(url, timeout = 15000, extraHeaders) {
+function fetch(url, timeout = 15000) {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith('https') ? https : http;
     const req = lib.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'User-Agent': 'LostSwordBot/1.0 (+https://github.com/LostSword)',
+        'Accept': 'application/rss+xml, application/xml, text/xml, application/json, */*',
         'Accept-Language': 'en-US,en;q=0.9',
-        ...(extraHeaders || {})
+        'Cache-Control': 'no-cache'
       }
     }, (res) => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString(), headers: res.headers }));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
     req.on('error', e => reject(e));
     req.setTimeout(timeout, () => { req.destroy(); reject(new Error('timeout')); });
@@ -31,88 +27,76 @@ function fetch(url, timeout = 15000, extraHeaders) {
 }
 
 function stripHtml(str) {
-  return str
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
+  return (str || '')
+    .replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>/g, '')
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/\n{3,}/g, '\n\n').trim();
 }
 
-function parseRSS(xml) {
+function parseRSSEntries(xml) {
   const entries = [];
+  if (!xml || xml.length < 50) return entries;
+
   for (const tag of ['entry', 'item']) {
-    const rx = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'g');
-    let m;
-    while ((m = rx.exec(xml)) !== null) {
-      const b = m[1];
-      const get = (t) => { const r = new RegExp(`<${t}[^>]*>([\\s\\S]*?)<\\/${t}>`, 'i').exec(b); return r ? stripHtml(r[1]) : ''; };
-      const link = (b.match(/<link[^>]+href="([^"]+)"/) || ['', ''])[1];
-      const id = get('id') || get('guid') || link;
+    let pos = 0;
+    let count = 0;
+    while (count < 100) {
+      const open = xml.indexOf(`<${tag}>`, pos);
+      if (open === -1) break;
+      const close = xml.indexOf(`</${tag}>`, open);
+      if (close === -1) break;
+      const block = xml.substring(open + tag.length + 2, close);
+
+      // 提取 link 属性
+      const linkAttr = (block.match(/<link[^>]+href=["']([^"']+)["']/) || [])[1]
+        || (block.match(/<link>([^<]+)<\/link>/) || [])[1] || '';
+
+      const get = (t) => {
+        const m = new RegExp(`<${t}[^>]*>([\\s\\S]*?)<\\/${t}>`, 'i').exec(block);
+        return m ? stripHtml(m[1]) : '';
+      };
+
+      const id = get('id') || get('guid') || linkAttr;
       const title = get('title');
       const rawAuthor = get('author') || get('dc:creator') || '';
       const author = rawAuthor.split('http')[0].trim();
       const updated = get('updated') || get('published') || get('pubDate');
-      if (id && title) entries.push({ id, title, author, link, updated });
+
+      if (title) entries.push({ id, title, author, link: linkAttr, updated });
+      pos = close + tag.length + 3;
+      count++;
     }
   }
   return entries;
 }
 
-function extractBodyFromHTML(html) {
-  if (!html) return '';
-  const patterns = [
-    /<div[^>]*data-testid="post-text"[^>]*>([\s\S]*?)<\/div>/i,
-    /<article[^>]*>([\s\S]*?)<\/article>/is,
-    /<div[^>]*class="[^"]*JD[^"]*"[^>]*>([\s\S]*?)<\/div>/is,
-  ];
-  for (const p of patterns) {
-    const m = p.exec(html);
-    if (m) {
-      const text = stripHtml(m[1]).substring(0, 500);
-      if (text.length > 20) return text;
-    }
-  }
-  const mainContent = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
-  if (mainContent) {
-    const text = stripHtml(mainContent[1]).substring(0, 500);
-    if (text.length > 30) return text;
-  }
-  return '';
-}
-
-async function enrichWithBody(posts) {
-  const top = posts.slice(0, 5);
-  const results = await Promise.allSettled(
-    top.map(async (p) => {
-      try {
-        const { status, body } = await fetch(p.link, 12000);
-        if (status !== 200) return p;
-        const text = extractBodyFromHTML(body);
-        return { ...p, body: text };
-      } catch(e) { return p; }
-    })
-  );
-  const enrichedMap = {};
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.link) enrichedMap[r.value.link] = r.value;
-  }
-  return posts.map(p => enrichedMap[p.link] || p);
-}
-
 async function fetchPosts() {
-  const results = await Promise.allSettled([
-    fetch('https://www.reddit.com/r/LostSwordOfficial/hot.rss'),
-    fetch('https://www.reddit.com/r/LostSwordOfficial/new.rss'),
-  ]);
+  const urls = [
+    { url: 'https://www.reddit.com/r/LostSwordOfficial/hot.rss', key: 'hot' },
+    { url: 'https://www.reddit.com/r/LostSwordOfficial/new.rss', key: 'new' },
+  ];
+
+  const results = await Promise.allSettled(
+    urls.map(({ url }) => fetch(url, 15000))
+  );
+
   const all = [];
   for (const r of results) {
-    if (r.status === 'fulfilled' && r.value.status === 200) all.push(...parseRSS(r.value.body));
+    if (r.status === 'fulfilled' && r.value.status === 200 && r.value.body) {
+      const entries = parseRSSEntries(r.value.body);
+      all.push(...entries);
+    }
   }
+
+  // 去重
   const seen = new Set();
-  const deduped = all.filter(e => { if (seen.has(e.link)) return false; seen.add(e.link); return true; });
- return await enrichWithBody(deduped);
+  return all.filter(e => {
+    const key = e.link || e.id;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 async function getPosts() {
@@ -125,14 +109,26 @@ async function getPosts() {
   return cache.posts;
 }
 
-(async () => { try { await getPosts(); console.error('[Ready] Cache warmed up'); } catch(e) { console.error('[Ready] Warmup failed'); } })();
-
+(async () => {
+  console.error('[Startup] Warming cache...');
+  try {
+    const posts = await fetchPosts();
+    cache.posts = posts;
+    cache.ts = Date.now();
+    console.error(`[Startup] Got ${posts.length} posts`);
+  } catch(e) {
+    console.error('[Startup] Failed:', e.message);
+  }
+})();
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
   try {
-    if (url.pathname === '/health') { res.end(JSON.stringify({ ok: true, ts: Date.now(), posts: cache.posts.length })); return; }
+    if (url.pathname === '/health') {
+      res.end(JSON.stringify({ ok: true, ts: Date.now(), posts: cache.posts.length }));
+      return;
+    }
     if (url.pathname === '/push') {
       const posts = await getPosts();
       res.end(JSON.stringify({ posts: posts.slice(0, 10), ts: Date.now() }));
@@ -142,4 +138,4 @@ const server = http.createServer(async (req, res) => {
   } catch(e) { res.statusCode = 500; res.end(JSON.stringify({ error: e.message })); }
 });
 
-server.listen(PORT, '0.0.0.0', () => { console.error(`Lost Sword Reddit Service on port ${PORT}`); });
+server.listen(PORT, '0.0.0.0', () => console.error(`Reddit Service on ${PORT}`));
