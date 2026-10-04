@@ -17,21 +17,32 @@ def fetch(url, timeout=10):
         return json.loads(r.read().decode())
 
 def fetch_posts():
-    url = 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=20'
-    data = fetch(url, timeout=10)
-    posts = []
-    for p in data.get('data', []):
-        posts.append({
-            'id': p.get('id', ''),
-            'title': p.get('title', ''),
-            'author': p.get('author', ''),
-            'score': p.get('score', 0),
-            'comments': p.get('num_comments', 0),
-            'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
-            'link': f"https://www.reddit.com{p.get('permalink', '')}",
-            'body': p.get('selftext', '')[:400],
-        })
-    return posts
+    # Pushshift 参数：不用 sort_type，用 sort + after
+    url = 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort=desc&size=20'
+    
+    last_err = None
+    for attempt in range(3):
+        try:
+            data = fetch(url, timeout=12)
+            posts = []
+            for p in data.get('data', []):
+                posts.append({
+                    'id': p.get('id', ''),
+                    'title': p.get('title', ''),
+                    'author': p.get('author', ''),
+                    'score': p.get('score', 0),
+                    'comments': p.get('num_comments', 0),
+                    'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
+                    'link': f"https://www.reddit.com{p.get('permalink', '')}",
+                    'body': p.get('selftext', '')[:400],
+                })
+            return posts
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(2)
+            continue
+    raise last_err
 
 def get_posts():
     now = time.time()
@@ -73,13 +84,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-try:
-    posts = fetch_posts()
-    cache['posts'] = posts
-    cache['ts'] = time.time()
-    print(f'Cached {len(posts)} posts', flush=True)
-except Exception as e:
-    print(f'Warmup failed: {e}', flush=True)
+for attempt in range(3):
+    try:
+        posts = fetch_posts()
+        cache['posts'] = posts
+        cache['ts'] = time.time()
+        print(f'Cached {len(posts)} posts', flush=True)
+        break
+    except Exception as e:
+        print(f'Warmup attempt {attempt+1} failed: {e}', flush=True)
+        if attempt < 2:
+            time.sleep(3)
 
 with socketserver.TCPServer(('', PORT), Handler) as httpd:
     print(f'Serving on port {PORT}', flush=True)
