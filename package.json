@@ -3,5 +3,8 @@
   "version": "1.0.0",
   "description": "Lost Sword Reddit proxy for OpenClaw",
   "main": "index.js",
-  "engines": { "node": ">=18" }
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "linkedom": "^0.18.0"
+  }
 }
