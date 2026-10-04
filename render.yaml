@@ -1,9 +1,9 @@
 services:
-  - type: web
-    name: lostsword-reddit
-    env: python
+  - name: lostsword-reddit
     region: oregon
+    runtime: python
     plan: free
-    buildCommand: python3 -m http.server 3000
+    buildCommand: ""
     startCommand: python3 server.py
     healthCheckPath: /health
+    pythonVersion: "3.11"
