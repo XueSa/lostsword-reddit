@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Lost Sword Reddit 资讯服务
-数据源：Pullpush.io Reddit API（带正确的 User-Agent）
+Lost Sword Reddit 资讯服务 v3 - 加诊断端点
 """
 import json, time, http.server, socketserver, urllib.request, os
 
 PORT = int(os.environ.get('PORT', 10000))
-CACHE_TTL = 300  # 5分钟
+CACHE_TTL = 300
 
 cache = {'posts': [], 'ts': 0}
 
 def fetch(url, timeout=15):
-    """带重试的 HTTP GET"""
     headers = {
-        # Pullpush 要求真实的 User-Agent，否则 403
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json',
     }
@@ -30,7 +27,6 @@ def fetch(url, timeout=15):
     raise last_err
 
 def fetch_posts():
-    """从 Pullpush.io 获取 LostSwordOfficial 帖子"""
     url = (
         'https://api.pullpush.io/reddit/search/submission/'
         '?subreddit=LostSwordOfficial'
@@ -88,6 +84,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 posts = get_posts()
                 self._send({'posts': posts, 'ts': int(time.time())})
                 return
+            if self.path == '/diag':
+                # 网络诊断
+                tests = [
+                    ('pullpush', 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=1', 15),
+                    ('google', 'https://www.google.com/', 5),
+                    ('httpbin', 'https://httpbin.org/get', 10),
+                    ('cloudflare', 'https://www.cloudflare.com/', 5),
+                ]
+                results = []
+                for name, url, timeout in tests:
+                    try:
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        start = time.time()
+                        with urllib.request.urlopen(req, timeout=timeout) as r:
+                            results.append({'name': name, 'status': r.status, 'elapsed': round(time.time()-start,2)})
+                    except Exception as e:
+                        results.append({'name': name, 'error': str(e)[:100]})
+                self._send({'diag': results, 'ts': int(time.time())})
+                return
             self._send({'error': 'not found'}, 404)
         except Exception as e:
             print(f'Error: {e}', flush=True)
@@ -96,7 +111,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-# 预热缓存
+# 预热
 for attempt in range(3):
     try:
         cache['posts'] = fetch_posts()
@@ -104,7 +119,7 @@ for attempt in range(3):
         print(f'Cached {len(cache["posts"])} posts', flush=True)
         break
     except Exception as e:
-        print(f'Warmup attempt {attempt+1} failed: {e}', flush=True)
+        print(f'Warmup {attempt+1} failed: {e}', flush=True)
         if attempt < 2:
             time.sleep(3)
 
