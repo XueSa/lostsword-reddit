@@ -1,8 +1,6 @@
+cat > /opt/render/project/src/server.py << 'ENDOFSERVER'
 #!/usr/bin/env python3
-"""
-Lost Sword Reddit 资讯服务 - 支持浏览器注入正文
-"""
-import json, time, http.server, socketserver, os, urllib.request, datetime
+import json, time, http.server, socketserver, os, urllib.request
 
 PORT = int(os.environ.get('PORT', 10000))
 CACHE_TTL = 300
@@ -11,10 +9,7 @@ INGEST_SECRET = os.environ.get('INGEST_SECRET', 'c207f687cdc0b0d5b2c339c07de8c9d
 CACHE = {'posts': [], 'ts': 0, 'last_ingest': 0}
 
 def fetch_reddit_json(url, timeout=15):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
-    }
+    headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
     last_err = None
     for attempt in range(3):
         try:
@@ -23,27 +18,21 @@ def fetch_reddit_json(url, timeout=15):
                 return json.loads(r.read().decode())
         except Exception as e:
             last_err = e
-            if attempt < 2:
-                time.sleep(2)
+            if attempt < 2: time.sleep(2)
     raise last_err
 
 def fetch_posts_from_pullpush():
-    url = (
-        'https://api.pullpush.io/reddit/search/submission/'
-        '?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=20'
-    )
+    url = 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=20'
     data = fetch_reddit_json(url)
     posts = []
     for p in data.get('data', []):
         posts.append({
-            'id': p.get('id', ''),
-            'title': p.get('title', ''),
-            'author': p.get('author', ''),
-            'score': p.get('score', 0),
+            'id': p.get('id', ''), 'title': p.get('title', ''),
+            'author': p.get('author', ''), 'score': p.get('score', 0),
             'comments': p.get('num_comments', 0),
             'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
             'created_utc': p.get('created_utc', 0),
-            'link': f"https://www.reddit.com{p.get('permalink', '')}",
+            'link': 'https://www.reddit.com' + p.get('permalink', ''),
             'body': p.get('selftext', '')[:500],
             'flair': p.get('link_flair_text', ''),
             'is_self': bool(p.get('selftext', '')),
@@ -57,11 +46,10 @@ def get_posts():
     try:
         CACHE['posts'] = fetch_posts_from_pullpush()
         CACHE['ts'] = now
-        print(f'Fallback Pullpush: {len(CACHE["posts"])} posts', flush=True)
+        print(f'Pullpush: {len(CACHE["posts"])} posts', flush=True)
     except Exception as e:
         print(f'Pullpush error: {e}', flush=True)
-        if not CACHE['posts']:
-            CACHE['posts'] = []
+        if not CACHE['posts']: CACHE['posts'] = []
     return CACHE['posts']
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -71,7 +59,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Ingest-Secret')
         self.send_header('Content-Length', len(body))
         self.end_headers()
         self.wfile.write(body)
@@ -87,15 +75,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._send({'error': 'unauthorized'}, 401)
                     return
                 length = int(self.headers.get('Content-Length', 0))
-                body = self.rfile.read(length)
-                posts = json.loads(body.decode())
+                posts = json.loads(self.rfile.read(length).decode())
                 if not isinstance(posts, list):
                     self._send({'error': 'expected array'}, 400)
                     return
                 CACHE['posts'] = posts
                 CACHE['ts'] = time.time()
                 CACHE['last_ingest'] = time.time()
-                print(f'Ingested {len(posts)} posts from browser', flush=True)
+                print(f'Ingested {len(posts)} posts', flush=True)
                 self._send({'ok': True, 'count': len(posts)})
                 return
             self._send({'error': 'not found'}, 404)
@@ -105,27 +92,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-           if self.path == '/health' or self.path == '/':
-                self._send({
-                    'ok': True, 'ts': int(time.time()),
-                    'posts': len(CACHE['posts']),
-                    'last_ingest': int(CACHE.get('last_ingest', 0)),
-                    'cache_age': int(time.time() - CACHE['ts']),
-                })
+            if self.path in ('/health', '/'):
+                self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
                 return
             if self.path == '/push':
-                posts = get_posts()
-                self._send({'posts': posts, 'ts': int(time.time())})
+                self._send({'posts': get_posts(), 'ts': int(time.time())})
                 return
             self._send({'error': 'not found'}, 404)
         except Exception as e:
             print(f'GET error: {e}', flush=True)
             self._send({'error': str(e)}, 500)
 
-    def log_message(self, fmt, *args):
-        pass
+    def log_message(self, fmt, *args): pass
 
-print(f'INGEST_SECRET: {INGEST_SECRET[:8]}...', flush=True)
+print(f'INGEST_SECRET: {bool(INGEST_SECRET)}', flush=True)
 print(f'Serving on port {PORT}', flush=True)
 with socketserver.TCPServer(('', PORT), Handler) as httpd:
     httpd.serve_forever()
+ENDOFSERVER
