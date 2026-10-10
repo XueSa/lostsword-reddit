@@ -3,7 +3,7 @@ import json, time, http.server, socketserver, os, urllib.request
 
 PORT = int(os.environ.get('PORT', 10000))
 CACHE_TTL = 300
-INGEST_SECRET = ***'INGEST_SECRET', 'c207f687cdc0b0d5b2c339c07de8c9de')
+INGEST_SECRET = os.environ.get('INGEST_SECRET', 'c207f687cdc0b0d5b2c339c07de8c9de')
 
 CACHE = {'posts': [], 'ts': 0, 'last_ingest': 0}
 
@@ -72,7 +72,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path == '/ingest':
                 secret = self.headers.get('X-Ingest-Secret', '')
                 if secret != INGEST_SECRET:
-                    ***'error': 'unauthorized'}, 401)
+                    self._send({'error': 'unauthorized'}, 401)
                     return
                 length = int(self.headers.get('Content-Length', 0))
                 posts = json.loads(self.rfile.read(length).decode())
@@ -93,7 +93,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path in ('/health', '/'):
-                self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
+               self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
                 return
             if self.path == '/push':
                 self._send({'posts': get_posts(), 'ts': int(time.time())})
@@ -105,7 +105,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass
 
-print(f'INGEST_SECRET: {bool(ING…T)}', flush=True)
+print(f'INGEST_SECRET: {bool(INGEST_SECRET)}', flush=True)
 print(f'Serving on port {PORT}', flush=True)
 with socketserver.TCPServer(('', PORT), Handler) as httpd:
     httpd.serve_forever()
