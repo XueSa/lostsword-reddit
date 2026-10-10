@@ -1,10 +1,9 @@
-cat > /opt/render/project/src/server.py << 'ENDOFSERVER'
 #!/usr/bin/env python3
 import json, time, http.server, socketserver, os, urllib.request
 
 PORT = int(os.environ.get('PORT', 10000))
 CACHE_TTL = 300
-INGEST_SECRET = os.environ.get('INGEST_SECRET', 'c207f687cdc0b0d5b2c339c07de8c9de')
+INGEST_SECRET = ***'INGEST_SECRET', 'c207f687cdc0b0d5b2c339c07de8c9de')
 
 CACHE = {'posts': [], 'ts': 0, 'last_ingest': 0}
 
@@ -53,6 +52,7 @@ def get_posts():
     return CACHE['posts']
 
 class Handler(http.server.BaseHTTPRequestHandler):
+
     def _send(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
@@ -72,7 +72,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path == '/ingest':
                 secret = self.headers.get('X-Ingest-Secret', '')
                 if secret != INGEST_SECRET:
-                    self._send({'error': 'unauthorized'}, 401)
+                    ***'error': 'unauthorized'}, 401)
                     return
                 length = int(self.headers.get('Content-Length', 0))
                 posts = json.loads(self.rfile.read(length).decode())
@@ -105,8 +105,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass
 
-print(f'INGEST_SECRET: {bool(INGEST_SECRET)}', flush=True)
+print(f'INGEST_SECRET: {bool(ING…T)}', flush=True)
 print(f'Serving on port {PORT}', flush=True)
 with socketserver.TCPServer(('', PORT), Handler) as httpd:
     httpd.serve_forever()
-ENDOFSERVER
