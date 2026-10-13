@@ -93,7 +93,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path in ('/health', '/'):
-               self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
+                self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
                 return
             if self.path == '/push':
                 self._send({'posts': get_posts(), 'ts': int(time.time())})
