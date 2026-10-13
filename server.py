@@ -20,14 +20,45 @@ def fetch_reddit_json(url, timeout=15):
             if attempt < 2: time.sleep(2)
     raise last_err
 
-def fetch_posts_from_pullpush():
-    url = 'https://api.pullpush.io/reddit/search/submission/?subreddit=LostSwordOfficial&sort_type=created_utc&sort=desc&size=20'
+def fetch_from_reddit_user():
+    """方案A: Reddit 用户 JSON API - u/LostSwordGlobal"""
+    url = 'https://www.reddit.com/u/LostSwordGlobal/submitted.json?limit=15&sort=new'
+    data = fetch_reddit_json(url)
+    posts = []
+    for child in data.get('data', {}).get('children', []):
+        p = child.get('data', {})
+        posts.append({
+            'id': p.get('id', ''),
+            'title': p.get('title', ''),
+            'author': p.get('author', ''),
+            'score': p.get('score', 0),
+            'comments': p.get('num_comments', 0),
+            'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
+            'created_utc': p.get('created_utc', 0),
+            'link': 'https://www.reddit.com' + p.get('permalink', ''),
+            'body': p.get('selftext', '')[:500],
+            'flair': p.get('link_flair_text', ''),
+            'is_self': bool(p.get('selftext', '')),
+        })
+    return posts
+
+def fetch_from_pullpush():
+    """方案B: Pullpush API - 按 author 过滤 u/LostSwordGlobal"""
+    url = (
+        'https://api.pullpush.io/reddit/search/submission/'
+        '?author=LostSwordGlobal'
+        '&sort_type=created_utc'
+        '&sort=desc'
+        '&size=15'
+    )
     data = fetch_reddit_json(url)
     posts = []
     for p in data.get('data', []):
         posts.append({
-            'id': p.get('id', ''), 'title': p.get('title', ''),
-            'author': p.get('author', ''), 'score': p.get('score', 0),
+            'id': p.get('id', ''),
+            'title': p.get('title', ''),
+            'author': p.get('author', ''),
+            'score': p.get('score', 0),
             'comments': p.get('num_comments', 0),
             'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
             'created_utc': p.get('created_utc', 0),
@@ -42,13 +73,28 @@ def get_posts():
     now = time.time()
     if CACHE['posts'] and (now - CACHE['ts']) < CACHE_TTL:
         return CACHE['posts']
+    # 优先 Reddit 用户 API
     try:
-        CACHE['posts'] = fetch_posts_from_pullpush()
-        CACHE['ts'] = now
-        print(f'Pullpush: {len(CACHE["posts"])} posts', flush=True)
+        posts = fetch_from_reddit_user()
+        if posts:
+            CACHE['posts'] = posts
+            CACHE['ts'] = now
+            print(f'Reddit user: {len(posts)} posts', flush=True)
+            return posts
     except Exception as e:
-        print(f'Pullpush error: {e}', flush=True)
-        if not CACHE['posts']: CACHE['posts'] = []
+        print(f'Reddit user failed: {e}', flush=True)
+    # 备用 Pullpush
+    try:
+        posts = fetch_from_pullpush()
+        if posts:
+            CACHE['posts'] = posts
+            CACHE['ts'] = now
+            print(f'Pullpush: {len(posts)} posts', flush=True)
+            return posts
+    except Exception as e:
+        print(f'Pullpush also failed: {e}', flush=True)
+    if not CACHE['posts']:
+        CACHE['posts'] = []
     return CACHE['posts']
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -58,14 +104,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Ingest-Secret')
         self.send_header('Content-Length', len(body))
         self.end_headers()
         self.wfile.write(body)
 
     def do_OPTIONS(self):
-        self._send({}, 204)
+        self._send({})
 
     def do_POST(self):
         try:
@@ -81,11 +125,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 CACHE['posts'] = posts
                 CACHE['ts'] = time.time()
-                CACHE['last_ingest'] = time.time()
-                print(f'Ingested {len(posts)} posts', flush=True)
-                self._send({'ok': True, 'count': len(posts)})
-                return
-            self._send({'error': 'not found'}, 404)
+                CACHE['last_ingest'] = int(time.time())
+                self._send({'ok': True, 'posts': len(posts), 'ts': int(time.time())})
+            else:
+                self._send({'error': 'not found'}, 404)
         except Exception as e:
             print(f'POST error: {e}', flush=True)
             self._send({'error': str(e)}, 500)
@@ -93,14 +136,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             if self.path in ('/health', '/'):
-                self._send({'ok': True, 'ts': int(time.time()), 'posts': len(CACHE['posts']), 'last_ingest': int(CACHE.get('last_ingest', 0)), 'cache_age': int(time.time() - CACHE['ts'])})
-                return
-            if self.path == '/push':
-                self._send({'posts': get_posts(), 'ts': int(time.time())})
-                return
-            self._send({'error': 'not found'}, 404)
+                self._send({'ok': True, 'ts': int(time.time()),
+                    'posts': len(CACHE['posts']),
+                    'last_ingest': int(CACHE.get('last_ingest', 0)),
+                    'cache_age': int(time.time() - CACHE['ts'])})
+            elif self.path == '/push':
+                posts = get_posts()
+                self._send({'posts': posts, 'ts': int(time.time())})
+            else:
+                self._send({'error': 'not found'}, 404)
         except Exception as e:
-            print(f'GET error: {e}', flush=True)
             self._send({'error': str(e)}, 500)
 
     def log_message(self, fmt, *args): pass
