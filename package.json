@@ -2,9 +2,13 @@
   "name": "lostsword-reddit-proxy",
   "version": "1.0.0",
   "description": "Lost Sword Reddit proxy for OpenClaw",
-  "main": "index.js",
+  "main": "server.js",
   "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "linkedom": "^0.18.0"
+    "linkedom": "^0.18.0",
+    "puppeteer-core": "^23.0.0"
   }
 }

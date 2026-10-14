@@ -1,9 +1,9 @@
+# render.yaml - explicit Node.js service definition
 services:
-  - name: lostsword-reddit
+  - type: web
+    name: lostsword-reddit
+    env: node
     region: oregon
-    runtime: python
     plan: free
-    buildCommand: ""
-    startCommand: python3 server.py
-    healthCheckPath: /health
-    pythonVersion: "3.11"
+    buildCommand: npm install
+    startCommand: node server.js

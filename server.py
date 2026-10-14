@@ -36,7 +36,7 @@ def fetch_from_reddit_user():
             'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
             'created_utc': p.get('created_utc', 0),
             'link': 'https://www.reddit.com' + p.get('permalink', ''),
-            'body': p.get('selftext', '')[:500],
+            'body': p.get('selftext', '')[:800],
             'flair': p.get('link_flair_text', ''),
             'is_self': bool(p.get('selftext', '')),
         })
@@ -63,7 +63,7 @@ def fetch_from_pullpush():
             'created': time.strftime('%Y-%m-%d', time.gmtime(p.get('created_utc', 0))),
             'created_utc': p.get('created_utc', 0),
             'link': 'https://www.reddit.com' + p.get('permalink', ''),
-            'body': p.get('selftext', '')[:500],
+            'body': p.get('selftext', '')[:800],
             'flair': p.get('link_flair_text', ''),
             'is_self': bool(p.get('selftext', '')),
         })
@@ -143,6 +143,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif self.path == '/push':
                 posts = get_posts()
                 self._send({'posts': posts, 'ts': int(time.time())})
+            elif self.path == '/test-reddit':
+                # 测试 Reddit 原生 API 返回的正文长度
+                try:
+                    url = 'https://www.reddit.com/u/LostSwordGlobal/submitted.json?limit=3'
+                    data = fetch_reddit_json(url)
+                    sample = []
+                    for child in data.get('data', {}).get('children', [])[:3]:
+                        p = child.get('data', {})
+                        sample.append({'title': p.get('title','')[:50], 'body_len': len(p.get('selftext','')), 'body_preview': p.get('selftext','')[:100]})
+                    self._send({'source': 'reddit_native', 'sample': sample})
+                except Exception as e:
+                    self._send({'source': 'reddit_native', 'error': str(e)})
             else:
                 self._send({'error': 'not found'}, 404)
         except Exception as e:
